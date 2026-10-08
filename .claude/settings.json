@@ -9,10 +9,21 @@
       "Bash(git diff:*)",
       "Bash(git log:*)"
     ],
+    "ask": [
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(terraform import:*)",
+      "Bash(terraform state:*)",
+      "Bash(doctl:*)",
+      "Bash(git push:*)",
+      "Bash(ssh:*)"
+    ],
     "deny": [
+      "Read(./.env)",
       "Read(./**/*.tfvars)",
       "Read(./**/*.tfstate)",
-      "Read(./**/.env)"
+      "Read(./**/*.tfstate.*)",
+      "Read(~/.ssh/**)"
     ]
   }
 }
