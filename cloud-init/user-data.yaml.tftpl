@@ -1,0 +1,97 @@
+#cloud-config
+# user-data.yaml.tftpl - first-boot hardening for the "on-prem" Fineract host.
+#
+# Rendered by Terraform via templatefile(). Template variables:
+#   admin_user      - non-root sudo user to create (e.g. "opsadmin")
+#   ssh_public_key  - public key injected by Terraform, authorized for that user
+#
+# GOAL: the Droplet hardens itself on first boot, so it is never online in an
+# unhardened state. Everything here runs before the box is handed over.
+#
+# Shell expansions inside runcmd are escaped as $${VAR} / left as $(...) so that
+# templatefile() does not touch them; only ${admin_user} and ${ssh_public_key}
+# are Terraform-interpolated.
+
+# --- cc_timezone: logs and cutover timing must be in the bank's local time ---
+timezone: Africa/Lagos
+
+# --- cc_users_groups: pre-create the docker group so the admin user can join it
+#     before the docker package (which would otherwise create it) is installed ---
+groups:
+  - docker
+
+# --- cc_users_groups: the only human login. Key-only, passwordless sudo.
+#     Passwordless sudo for a key-only user is an ACCEPTED RISK (see assessment):
+#     there is no interactive password to protect, and the key is the sole factor. ---
+users:
+  - name: ${admin_user}
+    groups: [sudo, docker]
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# --- cc_users_groups / cc_set_passwords: kill the two classic SSH attack surfaces
+#     up front - root login and password auth - independently of the drop-in below ---
+disable_root: true
+ssh_pwauth: false
+
+# --- cc_package_update_upgrade_install: refresh indexes and patch on first boot ---
+package_update: true
+package_upgrade: true
+
+# --- cc_package_update_upgrade_install: baseline security packages.
+#     ca-certificates/curl/gnupg are prerequisites for adding Docker's apt repo. ---
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - unattended-upgrades
+  - fail2ban
+
+# --- cc_write_files: drop files in place before runcmd needs them ---
+write_files:
+  # SSH hardening drop-in. 99- prefix so it wins over any earlier drop-in.
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      AllowUsers ${admin_user}
+      MaxAuthTries 3
+      X11Forwarding no
+
+  # Enable unattended-upgrades with both periodic jobs turned on.
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    owner: root:root
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+# --- cc_scripts_user (runcmd): the imperative steps, run last, in order ---
+runcmd:
+  # Apply the SSH hardening drop-in. cloud-init runs locally as root, so this
+  # does not risk the running session. (On 24.04 ssh may be socket-activated;
+  # restart covers both unit names.)
+  - systemctl restart ssh || systemctl restart sshd
+
+  # Turn on the security services installed above.
+  - systemctl enable --now fail2ban
+  - systemctl enable --now unattended-upgrades
+
+  # Docker Engine + Compose plugin from Docker's OFFICIAL apt repo (not Ubuntu's
+  # docker.io): current versions, the compose v2 plugin, and predictable naming.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $${VERSION_CODENAME}) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  - systemctl enable --now docker
+
+final_message: "cloud-init hardening complete after $UPTIME seconds."
